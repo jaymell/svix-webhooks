@@ -491,11 +491,33 @@ pub struct ExpiringSigningKey {
     pub expiration: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EndpointHeaders(
     pub HashMap<HeaderName, HeaderValue>
 );
 json_wrapper!(EndpointHeaders);
+
+impl Serialize for EndpointHeaders {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let hm = self.0;
+        let map = serializer.serialize_map(Some(hm.len()))?;
+        for (k, v) in hm {
+            let k = k.as_str();
+            match v.to_str() {
+                Ok(v) => match map.serialize_entry(k, v) {
+                    Ok(_) => {},
+                    Err(e) => e
+                },
+                Err(e) => e
+            }
+
+        }
+        map.end()
+    }
+}
 
 impl<'de> Deserialize<'de> for EndpointHeaders {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -511,7 +533,7 @@ impl<'de> Deserialize<'de> for EndpointHeaders {
                         (Ok(k), Ok(v)) => (k, v),
                         _ => Err(format!("Failed to builder header from key {} value {}", k, v))
 
-                    }?
+                    }
 
                   )
                   .collect()
