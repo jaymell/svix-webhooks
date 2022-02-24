@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 use svix_ksuid::*;
 use validator::{Validate, ValidationError, ValidationErrors};
-use http::header::HeaderMap;
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 
 const ALL_ERROR: &str = "__all__";
 
@@ -491,12 +491,35 @@ pub struct ExpiringSigningKey {
     pub expiration: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EndpointHeaders(
-    #[serde(with = "http_serde::header_map")]
-    pub HeaderMap
+    pub HashMap<HeaderName, HeaderValue>
 );
 json_wrapper!(EndpointHeaders);
+
+impl<'de> Deserialize<'de> for EndpointHeaders {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        HashMap::deserialize(deserializer)
+            .map(|x: HashMap<String, String>| {
+                x.into_iter()
+                  .map(|(k, v)|
+
+                    match ( HeaderName::try_from(k), HeaderValue::try_from(v) ) {
+                        (Ok(k), Ok(v)) => (k, v),
+                        _ => Err(format!("Failed to builder header from key {} value {}", k, v))
+
+                    }?
+
+                  )
+                  .collect()
+            })
+            .map(EndpointHeaders)
+    }
+}
+
 
 #[repr(i16)]
 #[derive(Clone, Debug, Copy, PartialEq, IntoPrimitive, TryFromPrimitive)]
