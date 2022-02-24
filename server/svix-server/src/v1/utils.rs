@@ -91,6 +91,7 @@ where
                 ),
                 _ => HttpError::bad_request(None, Some(err.to_string())),
             })?;
+            println!("ABOUT TO VALIDATE IT BRAH!");
         value.validate().map_err(|x| {
             let message = format!("Input validation error: [{}]", x).replace('\n', ", ");
             HttpError::unprocessable_entity(None, Some(message))

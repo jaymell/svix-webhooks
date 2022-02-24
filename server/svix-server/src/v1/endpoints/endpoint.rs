@@ -32,6 +32,7 @@ use std::{collections::HashMap, collections::HashSet, iter};
 
 use svix_server_derive::{ModelIn, ModelOut};
 use validator::{Validate, ValidationError};
+use http::header::HeaderMap;
 
 use crate::core::types::{EndpointHeaders, EndpointSecret};
 use crate::db::models::endpoint;
@@ -170,17 +171,17 @@ struct RecoverIn {
     since: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, PartialEq, Validate, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Validate)]
 #[serde(rename_all = "camelCase")]
 struct EndpointHeadersIn {
-    #[validate]
     headers: EndpointHeaders,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct EndpointHeadersOut {
-    headers: HashMap<String, String>,
+    #[serde(with = "http_serde::header_map")]
+    headers: HeaderMap,
     sensitive: HashSet<String>,
 }
 
@@ -194,26 +195,27 @@ impl EndpointHeadersOut {
     ];
 }
 
-// impl Default for EndpointHeadersOut {
-//     fn default() -> Self {
-//         Self {
-//             headers: HashMap::new(),
-//             sensitive: HashSet::new(),
-//         }
-//     }
-// }
-
 impl From<EndpointHeaders> for EndpointHeadersOut {
     fn from(hdr: EndpointHeaders) -> Self {
-        let (sens, remaining) = hdr.0.into_iter().partition(|(k, _)| {
+        let (sens, remaining) = hdr.0.into_iter()
+        .partition(|(k, _)| {
             Self::SENSITIVE_HEADERS
                 .iter()
-                .any(|&x| x == k)
+                .any(|&x|
+                    match k {
+                        Some(k) => x == k,
+                        None => false
+                    }
+                )
         });
 
         Self {
             headers: remaining,
-            sensitive: sens.into_iter().map(|(k, _)| k).collect(),
+            sensitive: sens
+                .into_iter()
+                .filter_map(|(k, _)| k)
+                .map(|k| k.as_str().to_owned())
+                .collect(),
         }
     }
 }
@@ -613,22 +615,24 @@ pub fn router() -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::EndpointHeadersOut;
+    use crate::v1::endpoints::endpoint::EndpointHeadersOut;
+    use std::collections::HashSet;
+    use http::header::HeaderName;
     use crate::core::types::EndpointHeaders;
-    use std::collections::{HashMap, HashSet};
+    use http::header::HeaderMap;
 
     #[test]
     fn test_into_endpoint_headers_out() {
-        let ep = EndpointHeaders(HashMap::from([
-            ("x-non-sensitive".to_owned(), "all-clear".to_owned()),
-            ("authorization".to_owned(), "should-be-omitted".to_owned()),
-        ]));
-
+        let mut map = HeaderMap::new();
+        map.insert(HeaderName::from_lowercase(b"x-non-sensitive").unwrap(), "all-clear".parse().unwrap());
+        map.insert(HeaderName::from_lowercase(b"authorization").unwrap(), "should-be-omitted".parse().unwrap());
+        let ep = EndpointHeaders(map);
         let epo: EndpointHeadersOut = ep.into();
-        assert_eq!(
-            HashMap::from([("x-non-sensitive".to_owned(), "all-clear".to_owned())]),
-            epo.headers
-        );
+
+        let mut map2 = HeaderMap::new();
+        map2.insert(HeaderName::from_lowercase(b"x-non-sensitive").unwrap(), "all-clear".parse().unwrap());
+
+        assert_eq!(map2, epo.headers);
         assert_eq!(HashSet::from(["authorization".to_owned()]), epo.sensitive);
     }
 }
