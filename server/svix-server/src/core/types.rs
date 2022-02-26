@@ -496,7 +496,7 @@ pub struct EndpointHeaders(
     pub HashMap<HeaderName, HeaderValue>
 );
 json_wrapper!(EndpointHeaders);
-
+use serde::ser::SerializeMap;
 impl Serialize for EndpointHeaders {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -504,16 +504,13 @@ impl Serialize for EndpointHeaders {
     {
         let hm = self.0;
         let map = serializer.serialize_map(Some(hm.len()))?;
+
         for (k, v) in hm {
             let k = k.as_str();
-            match v.to_str() {
-                Ok(v) => match map.serialize_entry(k, v) {
-                    Ok(_) => {},
-                    Err(e) => e
-                },
-                Err(e) => e
+            let v = v.to_str().unwrap();
+            if let Err(e) = map.serialize_entry(k, v) {
+                return Err(e);
             }
-
         }
         map.end()
     }
@@ -524,21 +521,19 @@ impl<'de> Deserialize<'de> for EndpointHeaders {
     where
         D: serde::Deserializer<'de>,
     {
-        HashMap::deserialize(deserializer)
-            .map(|x: HashMap<String, String>| {
-                x.into_iter()
-                  .map(|(k, v)|
+        let mut hm = HashMap::new();
 
-                    match ( HeaderName::try_from(k), HeaderValue::try_from(v) ) {
-                        (Ok(k), Ok(v)) => (k, v),
-                        _ => Err(format!("Failed to builder header from key {} value {}", k, v))
+        for (k, v) in HashMap<String,String>::deserialize(deserializer) {
 
-                    }
+           if let (Ok(k), Ok(v)) = ( HeaderName::try_from(k), HeaderValue::try_from(v) ) {
+                hm.insert(k, v);
+           } else {
+                return Err(format!("Failed to builder header from key {} value {}", k, v));
+           }
+        }
 
-                  )
-                  .collect()
-            })
-            .map(EndpointHeaders)
+        EndpointHeaders(hm)
+
     }
 }
 
