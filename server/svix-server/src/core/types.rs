@@ -450,13 +450,39 @@ impl<'de> Deserialize<'de> for EndpointSecret {
         use serde::de::Error;
         String::deserialize(deserializer)
             .and_then(|string| {
-                base64::decode(&string[Self::PREFIX.len()..])
-                    .map_err(|err| Error::custom(err.to_string()))
+                if !&string.starts_with(Self::PREFIX) {
+                    return Err(Error::custom("invalid prefix".to_string()));
+                } else {
+                    base64::decode(&string[Self::PREFIX.len()..])
+                        .map_err(|err| Error::custom(err.to_string()))
+                }
             })
             .map(EndpointSecret)
     }
 }
 
+impl Validate for EndpointSecret {
+    fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+        let re = format!(
+            r"^{}[a-zA-Z0-9+/]{{{}}}$",
+            EndpointSecret::PREFIX,
+            (EndpointSecret::KEY_SIZE * 4 / 3)
+        );
+        let re = regex::Regex::new(&re).unwrap();
+        let mut errors = ValidationErrors::new();
+
+        let encoded = format!("{}{}", EndpointSecret::PREFIX, base64::encode(&self.0));
+        if !re.is_match(encoded.as_str()) {
+            errors.add(ALL_ERROR, ValidationError::new("invalid secret"));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
 impl From<EndpointSecret> for sea_orm::Value {
     fn from(v: EndpointSecret) -> Self {
         Self::Bytes(Some(Box::new(v.0)))
