@@ -31,6 +31,11 @@ pub enum WebhookError {
     InvalidPayload,
 }
 
+pub enum VerificationStatus {
+    Verified,
+    NotVerified
+}
+
 pub struct Webhook {
     key: Vec<u8>,
 }
@@ -53,7 +58,7 @@ impl Webhook {
         Ok(Webhook { key })
     }
 
-    pub fn verify(&self, payload: &[u8], headers: &HeaderMap) -> Result<(), WebhookError> {
+    pub fn verify(&self, payload: &[u8], headers: &HeaderMap) -> Result<(VerificationStatus), WebhookError> {
         let msg_id = Self::get_header(headers, SVIX_MSG_ID_KEY, UNBRANDED_MSG_ID_KEY, "id")?;
         let msg_signature = Self::get_header(
             headers,
@@ -87,8 +92,8 @@ impl Webhook {
                     .fold(0, |acc, (a, b)| acc | (a ^ b))
                     == 0
             })
-            .then(|| ())
-            .ok_or(WebhookError::InvalidSignature)
+            .then(|| Ok(VerificationStatus::Verified ))
+            .unwrap_or(Ok(VerificationStatus::NotVerified))
     }
 
     pub fn sign(
