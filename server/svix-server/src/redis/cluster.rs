@@ -1,8 +1,7 @@
 use axum::async_trait;
-use redis::ErrorKind;
-use redis::{IntoConnectionInfo, RedisError, aio::ConnectionLike};
-use redis_cluster_async::Client;
 
+use redis::{IntoConnectionInfo, RedisError};
+use redis_cluster_async::Client;
 
 #[derive(Clone)]
 pub struct RedisClusterConnectionManager {
@@ -10,7 +9,9 @@ pub struct RedisClusterConnectionManager {
 }
 
 impl RedisClusterConnectionManager {
-    pub fn new<T: IntoConnectionInfo>(info: Vec<T>) -> Result<RedisClusterConnectionManager, RedisError> {
+    pub fn new<T: IntoConnectionInfo>(
+        info: Vec<T>,
+    ) -> Result<RedisClusterConnectionManager, RedisError> {
         Ok(RedisClusterConnectionManager {
             client: Client::open(info)?,
         })
@@ -28,7 +29,7 @@ impl bb8::ManageConnection for RedisClusterConnectionManager {
 
     async fn is_valid(
         &self,
-        conn: &mut bb8::PooledConnection<'_, Self>,
+        _conn: &mut bb8::PooledConnection<'_, Self>,
     ) -> Result<(), Self::Error> {
         Ok(())
         // let pong: String = redis::cmd("PING").query_async(conn).await?;
