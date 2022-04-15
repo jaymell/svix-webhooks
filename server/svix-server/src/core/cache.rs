@@ -56,6 +56,41 @@ pub(crate) use kv_def;
 
 /// A Redis-based cache of data to avoid expensive fetches from PostgreSQL. Simply a wrapper over
 /// Redis.
+/// 
+#[derive(Debug, Clone)]
+pub enum RedisCache {
+    Clustered(ClusteredRedisCache),
+    NotClustered(NotClusteredRedisCache)
+}
+
+impl RedisCache {
+
+   pub async fn get<T: CacheValue>(&self, key: &T::Key) -> Result<Option<T>> {
+        match self {
+            Self::Clustered(inner) => inner.get(key).await,
+            Self::NotClustered(inner) => inner.get(key).await
+        }
+   }
+
+   pub async fn set<T: CacheValue>(&self, key: &T::Key, value: &T, ttl: Duration) -> Result<()> {
+        match self {
+            Self::Clustered(inner) => inner.set(key, value, ttl).await,
+            Self::NotClustered(inner) => inner.set(key, value, ttl).await,
+        }
+
+   }
+
+   #[cfg(test)]
+   pub async fn delete<T: CacheKey>(&self, key: &T) -> Result<()> {
+        match self {
+            Self::Clustered(inner) => inner.delete(key).await,
+            Self::NotClustered(inner) => inner.delete(key).await,
+        }
+
+   }
+}
+
+
 #[derive(Debug, Clone)]
 pub struct NotClusteredRedisCache {
     pub redis: Pool<RedisConnectionManager>,
@@ -102,38 +137,6 @@ impl ClusteredRedisCache {
 
         Ok(())
     }
-}
-#[derive(Debug, Clone)]
-pub enum RedisCache {
-    Clustered(ClusteredRedisCache),
-    NotClustered(NotClusteredRedisCache)
-}
-
-impl RedisCache {
-
-   pub async fn get<T: CacheValue>(&self, key: &T::Key) -> Result<Option<T>> {
-        match self {
-            Self::Clustered(inner) => inner.get(key).await,
-            Self::NotClustered(inner) => inner.get(key).await
-        }
-   }
-
-   pub async fn set<T: CacheValue>(&self, key: &T::Key, value: &T, ttl: Duration) -> Result<()> {
-        match self {
-            Self::Clustered(inner) => inner.set(key, value, ttl).await,
-            Self::NotClustered(inner) => inner.set(key, value, ttl).await,
-        }
-
-   }
-
-   #[cfg(test)]
-   pub async fn delete<T: CacheKey>(&self, key: &T) -> Result<()> {
-        match self {
-            Self::Clustered(inner) => inner.delete(key).await,
-            Self::NotClustered(inner) => inner.delete(key).await,
-        }
-
-   }
 }
 
 impl NotClusteredRedisCache {
