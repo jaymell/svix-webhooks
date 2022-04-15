@@ -23,12 +23,14 @@ pub mod queue;
 pub mod v1;
 pub mod webhook;
 pub mod worker;
+pub mod redis_cluster;
 
 pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
     let pool = init_db(&cfg).await;
     let redis_pool = if let Some(redis_dsn) = &cfg.redis_dsn {
         tracing::debug!("Redis: Initializing pool");
         let manager = RedisConnectionManager::new(redis_dsn.to_string()).unwrap();
+        // let manager = redis_cluster::RedisClusterConnectionManager::new(vec![redis_dsn.to_string()]).unwrap();
         Some(bb8::Pool::builder().build(manager).await.unwrap())
     } else {
         None
@@ -47,7 +49,10 @@ pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
 
     let redis_cache = redis_pool
         .as_ref()
-        .map(|pool| RedisCache::new(pool.clone()));
+        .map(|pool| 
+            // RedisCache::Clustered(core::cache::ClusteredRedisCache { redis: pool.clone() })
+            RedisCache::NotClustered(core::cache::NotClusteredRedisCache { redis: pool.clone() })
+        );
 
     // build our application with a route
     let mut app = Router::new()
