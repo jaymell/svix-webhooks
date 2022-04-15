@@ -35,29 +35,15 @@ pub mod worker;
 
 pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
     let pool = init_db(&cfg).await;
-    // let redis_pool = if let Some(redis_dsn) = &cfg.redis_dsn {
-    //     tracing::debug!("Redis: Initializing pool");
-
-    //     let manager = if cfg.clustered_redis
-    //     {
-    //         RedisClusterConnectionManager::new(redis_dsn.clone()).unwrap()
-    //     } else {
-
-    //     };
-
-    //     let pool = bb8::Pool::builder().build(manager).await.unwrap();
-    //     Some(manager)
-
-    // } else {
-    //     None
-    // };
 
     let (redis_pool, redis_cache): (
         Option<Pool<RedisConnectionManager>>,
         Option<RedisCache<RedisConnectionManager>>,
     ) = if let QueueType::Redis = cfg.queue_type {
-        let mgr = RedisConnectionManager::new(cfg.redis_dsn.as_ref().unwrap().get(0).unwrap().to_string())
-            .unwrap();
+        let mgr = RedisConnectionManager::new(
+            cfg.redis_dsn.as_ref().unwrap().get(0).unwrap().to_string(),
+        )
+        .unwrap();
         let pool = bb8::Pool::builder().build(mgr).await.unwrap();
         let cache = RedisCache::new(pool.clone());
         (Some(pool), Some(cache))
@@ -69,7 +55,8 @@ pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
         Option<Pool<RedisClusterConnectionManager>>,
         Option<RedisCache<RedisClusterConnectionManager>>,
     ) = if let QueueType::RedisCluster = cfg.queue_type {
-        let mgr = RedisClusterConnectionManager::new(cfg.redis_dsn.as_ref().unwrap().clone()).unwrap();
+        let mgr =
+            RedisClusterConnectionManager::new(cfg.redis_dsn.as_ref().unwrap().clone()).unwrap();
         let pool = bb8::Pool::builder().build(mgr).await.unwrap();
         let cache = RedisCache::new(pool.clone());
         (Some(pool), Some(cache))
@@ -82,21 +69,34 @@ pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
         QueueType::Memory => queue::memory::new_pair().await,
         QueueType::Redis => {
             queue::redis::new_pair(
-                redis_pool.as_ref().expect("Failed to initialize queue: no pool available").clone(),
+                redis_pool
+                    .as_ref()
+                    .expect("Failed to initialize queue: no pool available")
+                    .clone(),
             )
             .await
         }
         QueueType::RedisCluster => {
             queue::redis::new_pair(
-                redis_cluster_pool.as_ref().expect("Failed to initialize queue: No clustered pool available").clone(),
+                redis_cluster_pool
+                    .as_ref()
+                    .expect("Failed to initialize queue: No clustered pool available")
+                    .clone(),
             )
             .await
         }
     };
 
     // build our application with a route
-    let mut app = Router::new()
-        .nest("/api/v1", v1::router())
+    let mut app = Router::new();
+
+    if let QueueType::RedisCluster = cfg.queue_type {
+        app = app.nest("/api/v1", v1::router::<RedisClusterConnectionManager>());
+    } else {
+        app = app.nest("/api/v1", v1::router::<RedisConnectionManager>());
+    }
+
+    let app = app
         .layer(TraceLayer::new_for_http().on_request(()))
         .layer(
             ServiceBuilder::new().layer_fn(|service| IdempotencyService {
@@ -109,12 +109,6 @@ pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
         .layer(Extension(cfg.clone()))
         .layer(Extension(redis_cache.clone()))
         .layer(Extension(redis_cluster_cache.clone()));
-
-    if let Some(redis_pool) = redis_pool {
-        app = app.layer(Extension(redis_pool.clone()));
-    } else if let Some(redis_cluster_pool) = redis_cluster_pool {
-        app = app.layer(Extension(redis_cluster_pool.clone()));
-    }
 
     let with_api = cfg.api_enabled;
     let with_worker = cfg.worker_enabled;
@@ -144,7 +138,7 @@ pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
         async {
             if with_worker {
                 tracing::debug!("Worker: Initializing");
-                worker_loop(cfg, pool, redis_cache, redis_cluster_cache, queue_tx, queue_rx).await
+                worker_loop(cfg, pool, redis_cache, queue_tx, queue_rx).await
             } else {
                 tracing::debug!("Worker: off");
                 Ok(())
