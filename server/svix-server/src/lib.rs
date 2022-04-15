@@ -5,7 +5,6 @@
 #![forbid(unsafe_code)]
 
 use axum::{extract::Extension, Router};
-use bb8_redis::RedisConnectionManager;
 use cfg::QueueType;
 use std::{
     net::{SocketAddr, TcpListener},
@@ -18,6 +17,7 @@ use crate::{
     cfg::Configuration,
     core::{cache::RedisCache, idempotency::IdempotencyService},
     db::init_db,
+    redis::RedisClusterConnectionManager,
     worker::worker_loop,
 };
 
@@ -26,6 +26,7 @@ pub mod core;
 pub mod db;
 pub mod error;
 pub mod queue;
+pub mod redis;
 pub mod v1;
 pub mod webhook;
 pub mod worker;
@@ -33,8 +34,9 @@ pub mod worker;
 pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
     let pool = init_db(&cfg).await;
     let redis_pool = if let Some(redis_dsn) = &cfg.redis_dsn {
-        tracing::debug!("Redis: Initializing pool");
-        let manager = RedisConnectionManager::new(redis_dsn.to_string()).unwrap();
+        tracing::debug!("Redis: Initializing pool {}", redis_dsn);
+        // let manager = RedisConnectionManager::new(redis_dsn.to_string()).unwrap();
+        let manager = RedisClusterConnectionManager::new(vec![redis_dsn.to_string()]).unwrap();
         Some(bb8::Pool::builder().build(manager).await.unwrap())
     } else {
         None
