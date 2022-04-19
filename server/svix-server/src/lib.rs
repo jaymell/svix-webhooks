@@ -13,28 +13,55 @@ use std::{
 };
 use tower_http::trace::TraceLayer;
 
-use crate::{cfg::Configuration, core::cache::RedisCache, db::init_db, worker::worker_loop};
+use crate::{
+    cfg::Configuration,
+    core::cache::RedisCache,
+    db::init_db,
+    redis::{
+        RedisClusterConnectionManager, SvixClusteredRedisPool, SvixNonClusteredRedisPool,
+        SvixRedisPool,
+    },
+    worker::worker_loop,
+};
 
 pub mod cfg;
 pub mod core;
 pub mod db;
 pub mod error;
 pub mod queue;
+pub mod redis;
 pub mod v1;
 pub mod webhook;
 pub mod worker;
 
 pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
     let pool = init_db(&cfg).await;
-    let redis_pool = if let Some(redis_dsn) = &cfg.redis_dsn {
+    let redis_pool: Option<SvixRedisPool> = if let Some(redis_dsn) = &cfg.redis_dsn {
         tracing::debug!("Redis: Initializing pool");
-        let manager = RedisConnectionManager::new(redis_dsn.to_string()).unwrap();
-        Some(bb8::Pool::builder().build(manager).await.unwrap())
+        let pool = match cfg.clustered_redis {
+            true => {
+                let mgr = RedisClusterConnectionManager::new(redis_dsn.clone()).unwrap();
+                let pool = SvixRedisPool::Clustered(SvixClusteredRedisPool {
+                    pool: bb8::Pool::builder().build(mgr).await.unwrap(),
+                });
+                pool
+            }
+            false => {
+                let mgr =
+                    RedisConnectionManager::new(redis_dsn.get(0).unwrap().to_string()).unwrap();
+                let pool = SvixRedisPool::NonClustered(SvixNonClusteredRedisPool {
+                    pool: bb8::Pool::builder().build(mgr).await.unwrap(),
+                });
+                pool
+            }
+        };
+        Some(pool)
     } else {
         None
     };
 
     tracing::debug!("Queue type: {:?}", cfg.queue_type);
+
     let (queue_tx, queue_rx) = match cfg.queue_type {
         QueueType::Memory => queue::memory::new_pair().await,
         QueueType::Redis => {

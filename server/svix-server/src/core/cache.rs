@@ -1,9 +1,9 @@
-use std::time::Duration;
-
+use crate::redis::{BoxedConnectionLike, PoolLike};
 use bb8::Pool;
 use bb8_redis::RedisConnectionManager;
 use redis::{AsyncCommands, RedisError};
 use serde::{de::DeserializeOwned, Serialize};
+use std::time::Duration;
 
 /// Errors internal to the cache
 #[derive(thiserror::Error, Debug)]
@@ -54,30 +54,42 @@ macro_rules! kv_def {
 }
 pub(crate) use kv_def;
 
+use crate::redis::SvixRedisPool;
+
 /// A Redis-based cache of data to avoid expensive fetches from PostgreSQL. Simply a wrapper over
 /// Redis.
 #[derive(Debug, Clone)]
 pub struct RedisCache {
-    redis: Pool<RedisConnectionManager>,
+    redis: SvixRedisPool,
 }
 
 impl RedisCache {
-    pub fn new(redis: Pool<RedisConnectionManager>) -> RedisCache {
+    pub fn new(redis: SvixRedisPool) -> RedisCache {
         RedisCache { redis }
     }
 
     pub async fn get<T: CacheValue>(&self, key: &T::Key) -> Result<Option<T>> {
-        let mut pool = self.redis.get().await?;
-        let fetched = pool.get::<&str, Option<String>>(key.as_ref()).await?;
-        Ok(fetched
-            .map(|json| serde_json::from_str(&json))
-            .transpose()?)
+        let mut pool = self.redis.get().await;
+
+        let fetched: String = redis::cmd("GET")
+            .arg(key.as_ref())
+            .query_async::<BoxedConnectionLike, String>(&mut pool)
+            .await?
+            .to_owned();
+
+        if &fetched == "" {
+            Ok(None)
+        } else {
+            Ok(
+                None, // serde_json::from_str(&fetched)?.transpose()
+            )
+        }
     }
 
     /// Sets a CacheKey to its associated CacheValue.
     /// Note that the [`Duration`] used is down to millisecond precision.
     pub async fn set<T: CacheValue>(&self, key: &T::Key, value: &T, ttl: Duration) -> Result<()> {
-        let mut pool = self.redis.get().await?;
+        let mut pool = self.redis.get().await;
 
         pool.pset_ex(
             key.as_ref(),
