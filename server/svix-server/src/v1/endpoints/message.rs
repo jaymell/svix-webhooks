@@ -322,7 +322,6 @@ where
     Router::new().nest(
         "/app/:app_id",
         Router::new()
-            .route("/msg/", post(create_message).get(list_messages))
             .route("/msg/", get(list_messages))
             .route("/msg/", post(create_message::<M>))
             .route("/msg/:msg_id/", get(get_message)),

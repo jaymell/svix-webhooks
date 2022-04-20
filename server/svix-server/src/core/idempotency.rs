@@ -14,8 +14,10 @@ use axum::{
     http::{Request, Response, StatusCode},
     response::IntoResponse,
 };
+use bb8::ManageConnection;
 use blake2::{Blake2b512, Digest};
 use http::request::Parts;
+use redis::aio::ConnectionLike;
 use serde::{Deserialize, Serialize};
 use tower::Service;
 
@@ -128,16 +130,22 @@ where
 
 /// The idempotency middleware itself -- used via the [`Router::layer`] method
 #[derive(Clone)]
-pub struct IdempotencyService<S: Clone> {
-    pub redis: Option<RedisCache>,
+pub struct IdempotencyService<S: Clone, M> 
+where
+M: ManageConnection + Clone,
+M::Connection: ConnectionLike,
+{
+    pub redis: Option<RedisCache<M>>,
     pub service: S,
 }
 
-impl<S> Service<Request<Body>> for IdempotencyService<S>
+impl<S, M> Service<Request<Body>> for IdempotencyService<S, M>
 where
     S: Service<Request<Body>, Error = Infallible> + Clone + Send + 'static,
     S::Response: IntoResponse,
     S::Future: Send + 'static,
+    M: ManageConnection + Clone,
+    M::Connection: ConnectionLike,
 {
     type Response = Response<BoxBody>;
     type Error = Infallible;
@@ -273,10 +281,14 @@ fn get_key(parts: &Parts) -> Option<IdempotencyKey> {
 
 /// If the lock could not be set, then another request with that key has been completed or is being
 /// completed, so loop until it has been completed or times out
-async fn lock_loop(
-    redis: &RedisCache,
+async fn lock_loop<M>(
+    redis: &RedisCache<M>,
     key: &IdempotencyKey,
-) -> Result<Option<SerializedResponse>, Error> {
+) -> Result<Option<SerializedResponse>, Error> 
+    where 
+    M: ManageConnection + Clone,
+    M::Connection: ConnectionLike,
+{
     let mut total_delay_duration = std::time::Duration::from_millis(0);
 
     loop {
@@ -303,8 +315,8 @@ async fn lock_loop(
 }
 
 /// Resolves the service and chaches the result assuming the response is successful
-async fn resolve_and_cache_response<S>(
-    redis: &RedisCache,
+async fn resolve_and_cache_response<S, M>(
+    redis: &RedisCache<M>,
     key: &IdempotencyKey,
     service: S,
     request: Request<Body>,
@@ -313,6 +325,8 @@ where
     S: Service<Request<Body>, Error = Infallible> + Clone + Send + 'static,
     S::Response: IntoResponse,
     S::Future: Send + 'static,
+    M: ManageConnection + Clone,
+    M::Connection: ConnectionLike,
 {
     let (parts, mut body) = resolve_service(service, request)
         .await
@@ -389,7 +403,7 @@ mod tests {
 
         let redis_pool = bb8::Pool::builder()
             .build(
-                bb8_redis::RedisConnectionManager::new(cfg.redis_dsn.as_deref().unwrap()).unwrap(),
+                bb8_redis::RedisConnectionManager::new(cfg.redis_dsn.as_ref().unwrap().get(0).unwrap().to_string()).unwrap(),
             )
             .await
             .unwrap();
@@ -598,7 +612,7 @@ mod tests {
 
         let redis_pool = bb8::Pool::builder()
             .build(
-                bb8_redis::RedisConnectionManager::new(cfg.redis_dsn.as_deref().unwrap()).unwrap(),
+                bb8_redis::RedisConnectionManager::new(cfg.redis_dsn.as_ref().unwrap().get(0).unwrap().to_string()).unwrap(),
             )
             .await
             .unwrap();

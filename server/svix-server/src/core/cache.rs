@@ -118,7 +118,7 @@ where
         value: &T,
         ttl: Duration,
     ) -> Result<bool> {
-        let mut pool = self.redis.get().await?;
+        let mut pool = self.redis.get().await.unwrap();
 
         let mut cmd = redis::Cmd::set(key.as_ref(), serde_json::to_string(value)?);
 
@@ -259,7 +259,7 @@ mod tests {
         let cfg = crate::cfg::load().unwrap();
 
         let redis_pool = bb8::Pool::builder()
-            .build(RedisConnectionManager::new(cfg.redis_dsn.as_deref().unwrap()).unwrap())
+            .build(RedisConnectionManager::new(cfg.redis_dsn.as_ref().unwrap().get(0).unwrap().to_string()).unwrap())
             .await
             .unwrap();
         let cache = RedisCache::new(redis_pool.clone());

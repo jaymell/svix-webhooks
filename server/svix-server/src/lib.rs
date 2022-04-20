@@ -89,22 +89,30 @@ pub async fn run(cfg: Configuration, listener: Option<TcpListener>) {
 
     // build our application with a route
     let mut app = Router::new();
+    app = app
+        .layer(TraceLayer::new_for_http().on_request(()));
 
     if let QueueType::RedisCluster = cfg.queue_type {
-        app = app.nest("/api/v1", v1::router::<RedisClusterConnectionManager>());
-    } else {
-        app = app.nest("/api/v1", v1::router::<RedisConnectionManager>());
-    }
-
-    let app = app
-        .layer(TraceLayer::new_for_http().on_request(()))
+        app = app.nest("/api/v1", v1::router::<RedisClusterConnectionManager>())
         .layer(
             ServiceBuilder::new().layer_fn(|service| IdempotencyService {
                 redis: redis_cache.clone(),
                 service,
             }),
-        )
-        .layer(Extension(pool.clone()))
+        );
+
+
+    } else {
+        app = app.nest("/api/v1", v1::router::<RedisConnectionManager>())
+        .layer(
+            ServiceBuilder::new().layer_fn(|service| IdempotencyService {
+                redis: redis_cluster_cache.clone(),
+                service,
+            }),
+        );
+    }
+
+        let app = app.layer(Extension(pool.clone()))
         .layer(Extension(queue_tx.clone()))
         .layer(Extension(cfg.clone()))
         .layer(Extension(redis_cache.clone()))
