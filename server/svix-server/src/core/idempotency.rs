@@ -765,4 +765,9 @@ mod tests {
         //assert_eq!(resp_1.headers(), resp_2.headers());
         assert_eq!(resp_1.text().await.unwrap(), resp_2.text().await.unwrap());
     }
+
+    #[tokio::test]
+    async fn test_v2_serialization_compatible_with_v1() {
+        todo!()
+    }
 }
