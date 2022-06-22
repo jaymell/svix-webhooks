@@ -7,7 +7,10 @@
 //!
 //! Responses are cached for twelve hours by default.
 
-use std::{collections::HashMap, convert::Infallible, future::Future, pin::Pin, time::Duration};
+use std::{
+    collections::HashMap, convert::Infallible, future::Future, pin::Pin, string::FromUtf8Error,
+    time::Duration,
+};
 
 use axum::{
     body::{boxed, Body, BoxBody, HttpBody},
@@ -21,7 +24,7 @@ use http::{header::ToStrError, request::Parts};
 use serde::{Deserialize, Serialize};
 use tower::Service;
 
-use super::cache::{Cache, CacheBehavior, CacheKey, StringCacheValue};
+use super::cache::{Cache, CacheBehavior, CacheKey, CacheValue};
 use crate::error::Error;
 
 /// Returns the default exipry period for cached responses
@@ -42,86 +45,58 @@ const fn wait_duration() -> Duration {
 
 #[derive(Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct SerializedResponse {
+pub struct SerializedResponseV2 {
     pub code: u16,
     pub headers: Option<HashMap<String, String>>,
     pub body: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct V1SerializedResponse {
+struct SerializedResponseV1 {
     code: u16,
     headers: Option<HashMap<String, Vec<u8>>>,
     body: Option<Vec<u8>>,
 }
 
-#[derive(Deserialize)]
-enum V1WrappedSerializedResponse {
-    Finished(V1SerializedResponse),
-}
+impl TryInto<SerializedResponseV2> for SerializedResponseV1 {
+    type Error = ConversionToResponseError;
+    fn try_into(self) -> Result<SerializedResponseV2, Self::Error> {
+        let headers = self
+            .headers
+            .map(|x| {
+                x.into_iter()
+                    .map(|(k, v)| match String::from_utf8(v) {
+                        Ok(v) => Ok((k, v)),
+                        Err(e) => Err(ConversionToResponseError::DeserializationError(e)),
+                    })
+                    .collect::<Result<HashMap<String, String>, ConversionToResponseError>>()
+            })
+            .transpose()?;
 
-impl V1WrappedSerializedResponse {
-    fn v1_response(self) -> V1SerializedResponse {
-        match self {
-            Self::Finished(resp) => resp,
-        }
+        let body = self
+            .body
+            .map(|b| String::from_utf8(b).map_err(ConversionToResponseError::DeserializationError))
+            .transpose()?;
+
+        Ok(SerializedResponseV2 {
+            code: self.code,
+            headers,
+            body,
+        })
     }
 }
 
 /// The data structure containing all necessary components of a response ready to be (de)serialized
 /// from/into the cache
-#[derive(Deserialize)]
-#[serde(untagged)]
+#[derive(Deserialize, Serialize)]
 enum WrappedSerializedResponse {
     Start,
-    Finished(SerializedResponse),
-    V1Finished(V1WrappedSerializedResponse),
+    FinishedV2(SerializedResponseV2),
+    #[serde(rename = "Finished")]
+    FinishedV1(SerializedResponseV1),
 }
 
-impl TryFrom<String> for WrappedSerializedResponse {
-    type Error = Error;
-    fn try_from(s: String) -> crate::error::Result<Self> {
-        let ret: crate::error::Result<WrappedSerializedResponse> =
-            serde_json::from_str(&s).map_err(|e| Error::Generic(e.to_string()));
-        match ret {
-            Ok(ret) => Ok(ret),
-            Err(e) => {
-                let ret: V1WrappedSerializedResponse =
-                    serde_json::from_str(&s).map_err(|_| Error::Generic(e.to_string()))?;
-                let ret = ret.v1_response();
-                Ok(Self::V1Finished(V1WrappedSerializedResponse::Finished(
-                    V1SerializedResponse {
-                        code: ret.code,
-                        headers: ret.headers,
-                        body: ret.body,
-                    },
-                )))
-            }
-        }
-    }
-}
-
-impl std::fmt::Display for WrappedSerializedResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Start => {
-                write!(f, "START")
-            }
-            Self::Finished(finished) => {
-                write!(
-                    f,
-                    "{}",
-                    serde_json::to_string(finished).map_err(|_| std::fmt::Error)?
-                )
-            }
-            Self::V1Finished(_) => {
-                panic!("V1Finished should not be used")
-            }
-        }
-    }
-}
-
-impl StringCacheValue for WrappedSerializedResponse {
+impl CacheValue for WrappedSerializedResponse {
     type Key = IdempotencyKey;
 }
 
@@ -136,6 +111,8 @@ pub enum ConversionToResponseError {
     InvalidHeaderValue(#[from] http::header::InvalidHeaderValue),
     #[error("invalid body")]
     InvalidBody(#[from] http::Error),
+    #[error("deserialization failed")]
+    DeserializationError(#[from] FromUtf8Error),
 }
 
 fn finished_serialized_response_to_reponse(
@@ -160,28 +137,6 @@ fn finished_serialized_response_to_reponse(
         .map_err(ConversionToResponseError::InvalidBody)
 }
 
-// TODO -- should ideally be removed entirely but currently cumbersome to remove, so
-// keeping in place for now
-fn v1_finished_serialized_response_to_reponse(
-    code: u16,
-    headers: Option<HashMap<String, Vec<u8>>>,
-    body: Option<Vec<u8>>,
-) -> Result<Response<BoxBody>, ConversionToResponseError> {
-    let mut out = body.unwrap_or_default().into_response();
-
-    let status = out.status_mut();
-    *status = code.try_into()?;
-
-    if let Some(resp_headers) = headers {
-        let headers = out.headers_mut();
-        *headers = resp_headers
-            .iter()
-            .map(|(k, v)| Ok((k.parse()?, http::HeaderValue::from_bytes(v)?)))
-            .collect::<Result<_, ConversionToResponseError>>()?;
-    }
-
-    Ok(out)
-}
 #[derive(Clone)]
 struct IdempotencyKey(String);
 
@@ -270,11 +225,7 @@ where
                 // Set the [`SerializedResponse::Start`] lock if the key does not exist in the cache
                 // returning whether the value was set
                 let lock_acquired = if let Ok(lock_acquired) = cache
-                    .set_string_if_not_exists(
-                        &key,
-                        &WrappedSerializedResponse::Start,
-                        expiry_starting(),
-                    )
+                    .set_if_not_exists(&key, &WrappedSerializedResponse::Start, expiry_starting())
                     .await
                 {
                     lock_acquired
@@ -290,26 +241,14 @@ where
                 //
                 // If at any point the cache returns an `Err`, then return 500 response
                 if !lock_acquired {
-                    match cache.get_string::<WrappedSerializedResponse>(&key).await {
-                        Ok(Some(WrappedSerializedResponse::Finished(resp))) => {
-                            let SerializedResponse {
+                    match cache.get::<WrappedSerializedResponse>(&key).await {
+                        Ok(Some(WrappedSerializedResponse::FinishedV2(resp))) => {
+                            let SerializedResponseV2 {
                                 code,
                                 headers,
                                 body,
                             } = resp;
-                            return Ok(finished_serialized_response_to_reponse(code, headers, body)
-                                .unwrap_or_else(|_| {
-                                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                                }));
-                        }
-
-                        Ok(Some(WrappedSerializedResponse::V1Finished(resp))) => {
-                            let V1SerializedResponse {
-                                code,
-                                headers,
-                                body,
-                            } = resp.v1_response();
-                            return Ok(v1_finished_serialized_response_to_reponse(
+                            return Ok(finished_serialized_response_to_reponse(
                                 code, headers, body,
                             )
                             .unwrap_or_else(|_| {
@@ -317,11 +256,28 @@ where
                             }));
                         }
 
+                        Ok(Some(WrappedSerializedResponse::FinishedV1(resp))) => {
+                            let resp: Result<SerializedResponseV2, ConversionToResponseError> =
+                                resp.try_into();
+                            if let Ok(resp) = resp {
+                                return Ok(finished_serialized_response_to_reponse(
+                                    resp.code,
+                                    resp.headers,
+                                    resp.body,
+                                )
+                                .unwrap_or_else(|_| {
+                                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                                }));
+                            } else {
+                                return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                            }
+                        }
+
                         Ok(Some(WrappedSerializedResponse::Start)) | Ok(None) => {
-                            if let Ok(Some(WrappedSerializedResponse::Finished(resp))) =
+                            if let Ok(Some(WrappedSerializedResponse::FinishedV2(resp))) =
                                 lock_loop(&cache, &key).await
                             {
-                                let SerializedResponse {
+                                let SerializedResponseV2 {
                                     code,
                                     headers,
                                     body,
@@ -337,7 +293,7 @@ where
                                 // as normal, but return 500 if the lock cannot be set
                                 if !matches!(
                                     cache
-                                        .set_string_if_not_exists(
+                                        .set_if_not_exists(
                                             &key,
                                             &WrappedSerializedResponse::Start,
                                             expiry_starting(),
@@ -400,10 +356,10 @@ async fn lock_loop(
         total_delay_duration += wait_duration();
         tokio::time::sleep(wait_duration()).await;
 
-        match cache.get_string::<WrappedSerializedResponse>(key).await {
+        match cache.get::<WrappedSerializedResponse>(key).await {
             // Value has been retreived from cache, so return it
-            Ok(Some(resp @ WrappedSerializedResponse::Finished(_)))
-            | Ok(Some(resp @ WrappedSerializedResponse::V1Finished(_))) => return Ok(Some(resp)),
+            Ok(Some(resp @ WrappedSerializedResponse::FinishedV2(_)))
+            | Ok(Some(resp @ WrappedSerializedResponse::FinishedV1(_))) => return Ok(Some(resp)),
 
             // Request setting the lock has not been resolved yet, so wait a little and loop again
             Ok(Some(WrappedSerializedResponse::Start)) => {
@@ -469,17 +425,13 @@ where
             return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
 
-        let resp = WrappedSerializedResponse::Finished(SerializedResponse {
+        let resp = WrappedSerializedResponse::FinishedV2(SerializedResponseV2 {
             code: parts.status.into(),
             headers: Some(headers),
             body,
         });
 
-        if cache
-            .set_string(key, &resp, expiry_default())
-            .await
-            .is_err()
-        {
+        if cache.set(key, &resp, expiry_default()).await.is_err() {
             return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
 
