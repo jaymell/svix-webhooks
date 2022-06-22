@@ -10,18 +10,18 @@
 use std::{collections::HashMap, convert::Infallible, future::Future, pin::Pin, time::Duration};
 
 use axum::{
-    body::{Body, BoxBody, HttpBody},
+    body::{boxed, Body, BoxBody, HttpBody},
     http::{Request, Response, StatusCode},
     response::IntoResponse,
 };
 
 use blake2::{Blake2b512, Digest};
-use http::request::Parts;
+use http::{header::ToStrError, request::Parts};
 
 use serde::{Deserialize, Serialize};
 use tower::Service;
 
-use super::cache::{Cache, CacheBehavior, CacheKey, CacheValue};
+use super::cache::{Cache, CacheBehavior, CacheKey, StringCacheValue};
 use crate::error::Error;
 
 /// Returns the default exipry period for cached responses
@@ -40,18 +40,88 @@ const fn wait_duration() -> Duration {
     Duration::from_millis(200)
 }
 
+#[derive(Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SerializedResponse {
+    pub code: u16,
+    pub headers: Option<HashMap<String, String>>,
+    pub body: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct V1SerializedResponse {
+    code: u16,
+    headers: Option<HashMap<String, Vec<u8>>>,
+    body: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+enum V1WrappedSerializedResponse {
+    Finished(V1SerializedResponse),
+}
+
+impl V1WrappedSerializedResponse {
+    fn v1_response(self) -> V1SerializedResponse {
+        match self {
+            Self::Finished(resp) => resp,
+        }
+    }
+}
+
 /// The data structure containing all necessary components of a response ready to be (de)serialized
 /// from/into the cache
-#[derive(Deserialize, Serialize)]
-enum SerializedResponse {
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WrappedSerializedResponse {
     Start,
-    Finished {
-        code: u16,
-        headers: Option<HashMap<String, Vec<u8>>>,
-        body: Option<Vec<u8>>,
-    },
+    Finished(SerializedResponse),
+    V1Finished(V1WrappedSerializedResponse),
 }
-impl CacheValue for SerializedResponse {
+
+impl TryFrom<String> for WrappedSerializedResponse {
+    type Error = Error;
+    fn try_from(s: String) -> crate::error::Result<Self> {
+        let ret: crate::error::Result<WrappedSerializedResponse> =
+            serde_json::from_str(&s).map_err(|e| Error::Generic(e.to_string()));
+        match ret {
+            Ok(ret) => Ok(ret),
+            Err(e) => {
+                let ret: V1WrappedSerializedResponse =
+                    serde_json::from_str(&s).map_err(|_| Error::Generic(e.to_string()))?;
+                let ret = ret.v1_response();
+                Ok(Self::V1Finished(V1WrappedSerializedResponse::Finished(
+                    V1SerializedResponse {
+                        code: ret.code,
+                        headers: ret.headers,
+                        body: ret.body,
+                    },
+                )))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for WrappedSerializedResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Start => {
+                write!(f, "START")
+            }
+            Self::Finished(finished) => {
+                write!(
+                    f,
+                    "{}",
+                    serde_json::to_string(finished).map_err(|_| std::fmt::Error)?
+                )
+            }
+            Self::V1Finished(_) => {
+                panic!("V1Finished should not be used")
+            }
+        }
+    }
+}
+
+impl StringCacheValue for WrappedSerializedResponse {
     type Key = IdempotencyKey;
 }
 
@@ -64,11 +134,35 @@ pub enum ConversionToResponseError {
     FromStr(#[from] http::header::InvalidHeaderName),
     #[error("a header value is invalid")]
     InvalidHeaderValue(#[from] http::header::InvalidHeaderValue),
+    #[error("invalid body")]
+    InvalidBody(#[from] http::Error),
 }
 
-/// Will never error as long as Redis doesn't corrupt -- never use this with anything but values
-/// from Redis which were put in via the idempotency service from known good requests.
 fn finished_serialized_response_to_reponse(
+    status_code: u16,
+    headers: Option<HashMap<String, String>>,
+    body: Option<String>,
+) -> Result<Response<BoxBody>, ConversionToResponseError> {
+    let mut resp = Response::builder().status(StatusCode::from_u16(status_code)?);
+
+    if let Some(resp_headers) = headers {
+        for (k, v) in resp_headers.iter() {
+            resp = resp.header(k, v);
+        }
+    }
+
+    let body = if let Some(body) = body {
+        boxed(Body::from(body))
+    } else {
+        boxed(Body::empty())
+    };
+    resp.body(body)
+        .map_err(ConversionToResponseError::InvalidBody)
+}
+
+// TODO -- should ideally be removed entirely but currently cumbersome to remove, so
+// keeping in place for now
+fn v1_finished_serialized_response_to_reponse(
     code: u16,
     headers: Option<HashMap<String, Vec<u8>>>,
     body: Option<Vec<u8>>,
@@ -88,7 +182,6 @@ fn finished_serialized_response_to_reponse(
 
     Ok(out)
 }
-
 #[derive(Clone)]
 struct IdempotencyKey(String);
 
@@ -177,7 +270,11 @@ where
                 // Set the [`SerializedResponse::Start`] lock if the key does not exist in the cache
                 // returning whether the value was set
                 let lock_acquired = if let Ok(lock_acquired) = cache
-                    .set_if_not_exists(&key, &SerializedResponse::Start, expiry_starting())
+                    .set_string_if_not_exists(
+                        &key,
+                        &WrappedSerializedResponse::Start,
+                        expiry_starting(),
+                    )
                     .await
                 {
                     lock_acquired
@@ -193,25 +290,42 @@ where
                 //
                 // If at any point the cache returns an `Err`, then return 500 response
                 if !lock_acquired {
-                    match cache.get::<SerializedResponse>(&key).await {
-                        Ok(Some(SerializedResponse::Finished {
-                            code,
-                            headers,
-                            body,
-                        })) => {
-                            return Ok(finished_serialized_response_to_reponse(code, headers, body)
-                                .unwrap_or_else(|_| {
-                                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                                }))
-                        }
-
-                        Ok(Some(SerializedResponse::Start)) | Ok(None) => {
-                            if let Ok(Some(SerializedResponse::Finished {
+                    match cache.get_string::<WrappedSerializedResponse>(&key).await {
+                        Ok(Some(WrappedSerializedResponse::Finished(resp))) => {
+                            let SerializedResponse {
                                 code,
                                 headers,
                                 body,
-                            })) = lock_loop(&cache, &key).await
+                            } = resp;
+                            return Ok(finished_serialized_response_to_reponse(code, headers, body)
+                                .unwrap_or_else(|_| {
+                                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                                }));
+                        }
+
+                        Ok(Some(WrappedSerializedResponse::V1Finished(resp))) => {
+                            let V1SerializedResponse {
+                                code,
+                                headers,
+                                body,
+                            } = resp.v1_response();
+                            return Ok(v1_finished_serialized_response_to_reponse(
+                                code, headers, body,
+                            )
+                            .unwrap_or_else(|_| {
+                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            }));
+                        }
+
+                        Ok(Some(WrappedSerializedResponse::Start)) | Ok(None) => {
+                            if let Ok(Some(WrappedSerializedResponse::Finished(resp))) =
+                                lock_loop(&cache, &key).await
                             {
+                                let SerializedResponse {
+                                    code,
+                                    headers,
+                                    body,
+                                } = resp;
                                 return Ok(finished_serialized_response_to_reponse(
                                     code, headers, body,
                                 )
@@ -223,9 +337,9 @@ where
                                 // as normal, but return 500 if the lock cannot be set
                                 if !matches!(
                                     cache
-                                        .set_if_not_exists(
+                                        .set_string_if_not_exists(
                                             &key,
-                                            &SerializedResponse::Start,
+                                            &WrappedSerializedResponse::Start,
                                             expiry_starting(),
                                         )
                                         .await,
@@ -279,19 +393,20 @@ fn get_key(parts: &Parts) -> Option<IdempotencyKey> {
 async fn lock_loop(
     cache: &Cache,
     key: &IdempotencyKey,
-) -> Result<Option<SerializedResponse>, Error> {
+) -> Result<Option<WrappedSerializedResponse>, Error> {
     let mut total_delay_duration = std::time::Duration::from_millis(0);
 
     loop {
         total_delay_duration += wait_duration();
         tokio::time::sleep(wait_duration()).await;
 
-        match cache.get::<SerializedResponse>(key).await {
+        match cache.get_string::<WrappedSerializedResponse>(key).await {
             // Value has been retreived from cache, so return it
-            Ok(Some(resp @ SerializedResponse::Finished { .. })) => return Ok(Some(resp)),
+            Ok(Some(resp @ WrappedSerializedResponse::Finished(_)))
+            | Ok(Some(resp @ WrappedSerializedResponse::V1Finished(_))) => return Ok(Some(resp)),
 
             // Request setting the lock has not been resolved yet, so wait a little and loop again
-            Ok(Some(SerializedResponse::Start)) => {
+            Ok(Some(WrappedSerializedResponse::Start)) => {
                 if total_delay_duration > expiry_starting() {
                     return Ok(None);
                 }
@@ -328,19 +443,43 @@ where
         // TODO: Don't skip over Err value
         let bytes = body.data().await.and_then(Result::ok);
 
-        let resp = SerializedResponse::Finished {
-            code: parts.status.into(),
-            headers: Some(
-                parts
-                    .headers
-                    .iter()
-                    .map(|(k, v)| (k.as_str().to_owned(), v.as_bytes().to_owned()))
-                    .collect(),
-            ),
-            body: bytes.clone().map(|b| b.to_vec()),
+        let headers = parts
+            .headers
+            .iter()
+            .map(|(k, v)| match v.to_str() {
+                Ok(v) => Ok((k.as_str().to_owned(), v.to_owned())),
+                Err(e) => Err(e),
+            })
+            .collect::<Result<HashMap<String, String>, ToStrError>>();
+
+        let headers = if let Ok(headers) = headers {
+            headers
+        } else {
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         };
 
-        if cache.set(key, &resp, expiry_default()).await.is_err() {
+        let body = bytes
+            .clone()
+            .map(|b| std::str::from_utf8(&b).map(|b| b.to_owned()))
+            .transpose();
+
+        let body = if let Ok(body) = body {
+            body
+        } else {
+            return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        };
+
+        let resp = WrappedSerializedResponse::Finished(SerializedResponse {
+            code: parts.status.into(),
+            headers: Some(headers),
+            body,
+        });
+
+        if cache
+            .set_string(key, &resp, expiry_default())
+            .await
+            .is_err()
+        {
             return Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
 
@@ -557,7 +696,7 @@ mod tests {
         let resp_1_jh = tokio::spawn(
             client
                 .post(&endpoint)
-                .header("idempotency-key", "1")
+                .header("idempotency-key", "abc")
                 .header("Authorization", &token)
                 .send(),
         );
@@ -565,7 +704,7 @@ mod tests {
         let resp_2_jh = tokio::spawn(
             client
                 .post(&endpoint)
-                .header("idempotency-key", "1")
+                .header("idempotency-key", "abc")
                 .header("Authorization", &token)
                 .send(),
         );
@@ -573,8 +712,10 @@ mod tests {
         let resp_1 = resp_1_jh.await.unwrap().unwrap();
         let resp_1_instant = std::time::Instant::now();
 
+        println!("1 {:?}", &resp_1_instant);
         let resp_2 = resp_2_jh.await.unwrap().unwrap();
         let resp_2_instant = std::time::Instant::now();
+        println!("2 {:?}", &resp_2_instant);
 
         assert!(resp_1_instant - start < std::time::Duration::from_millis(350));
         assert!(resp_2_instant - start > std::time::Duration::from_millis(400));
