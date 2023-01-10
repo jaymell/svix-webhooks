@@ -94,3 +94,6 @@ api_enabled = true
 
 # Should this instance run the message worker
 worker_enabled = true
+
+# Maximum number of concurrent worker tasks to spawn (0 is unlimited)
+worker_max_tasks = 500

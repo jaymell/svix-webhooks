@@ -8,7 +8,7 @@ use sea_orm::{query::Statement, ConnectionTrait, DatabaseBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    core::cache::{kv_def, CacheBehavior, CacheKey, CacheValue},
+    core::cache::{kv_def, CacheBehavior, CacheKey},
     queue::QueueTask,
     AppState,
 };

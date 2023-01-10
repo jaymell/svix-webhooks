@@ -76,7 +76,7 @@ impl CacheBehavior for RedisCache {
 #[cfg(test)]
 mod tests {
     use super::{
-        super::{kv_def, string_kv_def, CacheValue, StringCacheValue},
+        super::{kv_def, string_kv_def},
         *,
     };
     use serde::{Deserialize, Serialize};

@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: © 2022 Svix Authors
 // SPDX-License-Identifier: MIT
 
-use std::{borrow::Cow, collections::HashSet, error::Error as StdError, ops::Deref, str::FromStr};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    error::Error as StdError,
+    ops::Deref,
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     async_trait,
@@ -421,6 +428,13 @@ pub fn validate_no_control_characters_unrequired(
         UnrequiredField::Absent => Ok(()),
         UnrequiredField::Some(str) => validate_no_control_characters(str),
     }
+}
+
+pub fn get_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 #[cfg(test)]

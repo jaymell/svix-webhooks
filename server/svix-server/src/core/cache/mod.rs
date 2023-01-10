@@ -63,8 +63,7 @@ macro_rules! kv_def_inner {
                 &self.0
             }
         }
-
-        impl CacheValue for $val_struct {
+        impl $crate::core::cache::CacheValue for $val_struct {
             type Key = $key_id;
         }
     };
@@ -104,7 +103,7 @@ macro_rules! string_kv_def_inner {
             }
         }
 
-        impl StringCacheValue for $val_struct {
+        impl $crate::core::cache::StringCacheValue for $val_struct {
             type Key = $key_id;
         }
     };
@@ -113,7 +112,6 @@ macro_rules! string_kv_def_inner {
 pub(crate) use string_kv_def_inner;
 
 // Used downstream and for testing:
-#[allow(unused_macros)]
 macro_rules! string_kv_def {
     ($key_id:ident, $val_struct:ident, $lit_prefix:literal) => {
         crate::core::cache::string_kv_def_inner!($key_id, $val_struct);
@@ -126,10 +124,10 @@ macro_rules! string_kv_def {
     ($key_id:ident, $val_struct:ident) => {
         crate::core::cache::string_kv_def_inner!($key_id, $val_struct);
 
-        impl CacheKey for $key_id {}
+        impl $crate::core::cache::CacheKey for $key_id {}
     };
 }
-#[allow(unused_imports)]
+
 pub(crate) use string_kv_def;
 
 #[derive(Clone)]

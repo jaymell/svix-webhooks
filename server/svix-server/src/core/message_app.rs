@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     core::{
-        cache::{kv_def, Cache, CacheBehavior, CacheKey, CacheValue},
+        cache::{kv_def, Cache, CacheBehavior, CacheKey},
         types::{
             ApplicationId, ApplicationUid, EndpointHeaders, EndpointId, EndpointSecretInternal,
             EventChannelSet, EventTypeNameSet, ExpiringSigningKeys, MessageAttemptTriggerType,
@@ -67,7 +67,7 @@ impl CreateMessageApp {
     /// exists or from PostgreSQL otherwise. If the RedisCache is Some, but does not contain the
     /// requisite information, fetch it from PostgreSQL and insert the data into the cache.
     pub async fn layered_fetch(
-        cache: Cache,
+        cache: &Cache,
         pg: &DatabaseConnection,
         app: Option<application::Model>,
         org_id: OrganizationId,

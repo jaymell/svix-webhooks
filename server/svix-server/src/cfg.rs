@@ -7,6 +7,7 @@ use figment::{
     providers::{Env, Format, Toml},
     Figment,
 };
+use ipnet::IpNet;
 use std::time::Duration;
 
 use crate::{core::cryptography::Encryption, core::security::Keys, error::Result};
@@ -175,6 +176,10 @@ pub struct ConfigurationInner {
 
     #[serde(flatten)]
     pub internal: InternalConfig,
+
+    pub whitelist_subnets: Option<Arc<Vec<IpNet>>>,
+
+    pub worker_max_tasks: u16,
 }
 
 fn validate_config_complete(

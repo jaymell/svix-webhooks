@@ -105,10 +105,7 @@ fn check_is_expired(vw: &ValueWrapper) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{kv_def, CacheValue, StringCacheValue},
-        *,
-    };
+    use super::{super::kv_def, *};
     use crate::core::cache::string_kv_def;
     use serde::{Deserialize, Serialize};
 

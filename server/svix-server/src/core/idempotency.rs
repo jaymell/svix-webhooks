@@ -21,7 +21,7 @@ use http::request::Parts;
 use serde::{Deserialize, Serialize};
 use tower::Service;
 
-use super::cache::{kv_def, Cache, CacheBehavior, CacheKey, CacheValue};
+use super::cache::{kv_def, Cache, CacheBehavior, CacheKey};
 use crate::{err_database, error::Error};
 
 /// Returns the default exipry period for cached responses
